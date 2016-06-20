@@ -1,19 +1,25 @@
 %define	xrdpver		%%XRDPVER%%
 %define	xrdpbranch	%%XRDPBRANCH%%
 
+%if 0%{?fedora} >= 16 || 0%{?rhel} >= 7
+%global with_systemd 1
+%else
+%global with_systemd 0
+%endif
+
 Summary:	Open source Remote Desktop Protocol (RDP) server
 Name:		xrdp
 Version:	%{xrdpver}+%{xrdpbranch}
 License:	Apache License 2.0
 Release:	1%{?dist}
 URL:		http://www.xrdp.org/
-Source0:	https://codeload.github.com/%%GH_ACCOUNT%%/%%GH_PROJECT%%/legacy.tar.gz/%%GH_COMMIT%%?dummy=/%%GH_ACCOUNT%%-%%GH_PROJECT%%-%%GH_COMMIT%%.tar.gz
+Source0:	%%GH_ACCOUNT%%-%%GH_PROJECT%%-%%GH_COMMIT%%.tar.gz
 Source1:	xrdp.init
 Source2:	xrdp.sysconfig
 Source3:	xrdp.logrotate
 
-Patch0:		xrdp-pam-auth.patch
-Patch1:		sesman.ini.patch
+Patch0:		sesman.ini.patch
+Patch1:		xrdp-pam-auth.patch
 
 # Basic dependensies
 BuildRequires:	autoconf
@@ -24,34 +30,43 @@ BuildRequires:	pam-devel
 BuildRequires:	libX11-devel
 BuildRequires:	libXfixes-devel
 BuildRequires:	libXrandr-devel
-BuildRequires:	fuse-devel
 BuildRequires:	which
 BuildRequires:	make
 # Additional dependencies which vary on depending on build options
 BuildRequires:	%%BUILDREQUIRES%%
+# Runtime dependencies
+Requires:	fuse
 
 BuildRoot:	%{_tmppath}/%{name}-%{version}-root
 
-#initscripts requires
-Requires(post): chkconfig
-Requires(preun): chkconfig
-# This is for /sbin/service
-Requires(preun): initscripts
-# This is for /sbin/service
+# initscripts is required for /sbin/service
+%if 0%{?with_systemd}
+Requires(post): systemd
+Requires(preun): systemd
+Requires(postun): systemd
+%else
+Requires(post): chkconfig initscripts
+Requires(preun): chkconfig initscripts
 Requires(postun): initscripts
+%endif
 
 %description
 RDP server for Linux
 
 %prep
 %setup -q -n %%GH_ACCOUNT%%-%%GH_PROJECT%%-%%GH_COMMIT%%
-%patch0
-%patch1 -p 1
+%patch0 -p 1
+# neutrinolabs/xrdp devel branch after 3934be9 does not require this patch.
+if [ -e instfiles/pam.d/xrdp-sesman ]
+then
+%patch1
+fi
 
 %build
 ./bootstrap
 %configure \
 	%%CONFIGURE_ARGS%%
+%{__make} -C librfxcodec
 %{__make}
 
 %install
@@ -66,28 +81,39 @@ RDP server for Linux
 %{__rm} -rf %{buildroot}/etc/init.d %{buildroot}/etc/default
 
 # rsakeys.ini
-touch %{buildroot}%{_sysconfdir}/xrdp/rsakeys.ini
-%{__chmod} 0600 %{buildroot}%{_sysconfdir}/xrdp/rsakeys.ini
+%{__rm} -f %{buildroot}%{_sysconfdir}/xrdp/rsakeys.ini
 
 %post
-# This adds the proper /etc/rc*.d links for the script
-/sbin/chkconfig --add %{name}
-/sbin/chkconfig %{name} on
 # generate RSA key pair
-xrdp-keygen xrdp %{_sysconfdir}/xrdp/rsakeys.ini > /dev/null
-%{__chmod} 0600 %{_sysconfdir}/xrdp/rsakeys.ini
-/sbin/service %{name} start >/dev/null 2>&1 || :
+if [ ! -s %{_sysconfdir}/xrdp/rsakeys.ini ]; then
+    umask 077 && %{_bindir}/xrdp-keygen xrdp %{_sysconfdir}/xrdp/rsakeys.ini 2048 >/dev/null
+fi
+%if 0%{?with_systemd}
+%systemd_post xrdp.service xrdp-sesman.service
+%else
+# This adds the proper /etc/rc*.d links for the script
+if [ "$1" -eq "1" ]; then
+    /sbin/chkconfig --add %{name}
+fi
+%endif
 
 %preun
+%if 0%{?with_systemd}
+%systemd_preun xrdp.service xrdp-sesman.service
+%else
 if [ "$1" -eq "0" ] ; then
     /sbin/chkconfig --del %{name}
-    /sbin/service %{name} stop >/dev/null 2>&1 || :
 fi
+%endif
 
 %postun
+%if 0%{?with_systemd}
+%systemd_postun_with_restart xrdp.service xrdp-sesman.service
+%else
 if [ "$1" -ge "1" ] ; then
     /sbin/service %{name} condrestart >/dev/null 2>&1 || :
 fi
+%endif
 
 %clean
 rm -rf %{buildroot}
@@ -96,22 +122,32 @@ rm -rf %{buildroot}
 %defattr(-,root,root)
 %doc COPYING *.txt
 %dir %{_libdir}/xrdp
-%dir %{_sysconfdir}/xrdp
 %dir %{_datadir}/xrdp
+%dir %{_sysconfdir}/xrdp
+%dir %{_sysconfdir}/xrdp/pulse
 %config(noreplace) %{_sysconfdir}/xrdp/sesman.ini
 %config(noreplace) %{_sysconfdir}/xrdp/xrdp.ini
+%config(noreplace) %{_sysconfdir}/xrdp/xrdp_keyboard.ini
 %config(noreplace) %{_sysconfdir}/pam.d/xrdp-sesman
 %config(noreplace) %{_sysconfdir}/logrotate.d/xrdp
 %config(noreplace) %{_sysconfdir}/sysconfig/xrdp
+%{_sysconfdir}/xrdp/pulse/*
+%{_sysconfdir}/xrdp/km-*.ini
+%{_sysconfdir}/xrdp/*.sh
+%{_libdir}/xrdp/*
+%{_datadir}/xrdp/*
+%{_sbindir}/*
+%{_bindir}/*
 %{_mandir}/man1/*
 %{_mandir}/man5/*
 %{_mandir}/man8/*
-%{_libdir}/xrdp/*
-%{_datadir}/*
-%{_sbindir}/*
-%{_bindir}/*
-%{_sysconfdir}/*
-%{_initrddir}
-%attr(0600,root,root) %verify(not size md5 mtime) %{_sysconfdir}/xrdp/rsakeys.ini
-/usr/lib/systemd/system/xrdp-sesman.service
-/usr/lib/systemd/system/xrdp.service
+# BUG /etc/rc.d/init.d/xrdp is always installed even though it isn't necessary
+# BUG under systemd environment
+%{_initrddir}/*
+%if 0%{?with_systemd}
+%{_unitdir}/xrdp-sesman.service
+%{_unitdir}/xrdp.service
+%else
+# BUG upstream bug 
+#%{_initrddir}/*
+%endif
